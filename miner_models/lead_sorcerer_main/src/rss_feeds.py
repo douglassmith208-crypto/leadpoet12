@@ -36,6 +36,19 @@ FREE_EMAIL_DOMAINS = {
     'me.com', 'mac.com', 'ymail.com', 'rocketmail.com'
 }
 
+# Leadership keywords for identifying executive announcements
+LEADERSHIP_KEYWORDS = [
+    'CEO', 'Chief Executive Officer', 'CFO', 'Chief Financial Officer',
+    'CTO', 'Chief Technology Officer', 'COO', 'Chief Operating Officer',
+    'CMO', 'Chief Marketing Officer', 'CHRO', 'Chief Human Resources Officer',
+    'CIO', 'Chief Information Officer', 'President', 'VP', 'Vice President',
+    'SVP', 'Senior Vice President', 'EVP', 'Executive Vice President',
+    'Director', 'Managing Director', 'General Manager', 'Partner',
+    'Founder', 'Co-Founder', 'Chairman', 'Board Member', 'Executive',
+    'Head of', 'Leader', 'Appointed', 'Named', 'Hired', 'Joins',
+    'Leadership', 'Management', 'Executive Team'
+]
+
 # Valid employee count ranges
 VALID_EMPLOYEE_COUNTS = [
     "0-1", "2-10", "11-50", "51-200", "201-500",
