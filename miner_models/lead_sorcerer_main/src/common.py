@@ -56,36 +56,15 @@ class ErrorCode(Enum):
 
 
 def normalize_domain(domain: str) -> str:
-    """
-    Normalize domain to eTLD+1 using Public Suffix List.
-
-    Args:
-        domain: Raw domain string (e.g., "sub.foo.co.uk")
-
-    Returns:
-        Normalized eTLD+1 domain (e.g., "foo.co.uk")
-    """
+    """Normalize a domain by removing protocol, www and trailing slashes."""
     if not domain:
-        return domain
-
-    # Remove protocol if present
-    if domain.startswith(("http://", "https://")):
-        domain = urlparse(domain).netloc
-
-    # Remove port if present
-    if ":" in domain:
-        domain = domain.split(":")[0]
-
-    # Normalize to lowercase
+        return ''
     domain = domain.lower().strip()
-
-    # Get eTLD+1 using publicsuffix2
-    try:
-        ps = publicsuffix2.PublicSuffixList()
-        return ps.get_public_suffix(domain)
-    except Exception:
-        # Fallback: return as-is if parsing fails
-        return domain
+    for prefix in ['https://', 'http://', 'www.']:
+        if domain.startswith(prefix):
+            domain = domain[len(prefix):]
+    domain = domain.split('/')[0].split('?')[0].split('#')[0]
+    return domain
 
 
 def normalize_text(text: str) -> str:
