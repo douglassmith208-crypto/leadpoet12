@@ -1,19 +1,23 @@
 """
-Integration wrapper for Lead Sorcerer model to be compatible with the existing miner system.
+Dynamic lead sourcing pipeline for Lead Sorcerer model.
 
-This module provides a get_leads() function that runs the Lead Sorcerer orchestrator
-and converts the output to the format expected by the existing miner code.
+This module provides a get_leads() function that fetches real-time data from
+public sources (SEC EDGAR, RSS feeds, job listings, company websites) to
+generate unique, high-quality B2B leads.
+
+All leads are dynamically discovered at runtime - no hardcoded company names
+or executive information.
 """
 
 import asyncio
 import json
 import os
 import sys
-import tempfile
-import shutil
+import re
 from pathlib import Path
 from typing import List, Dict, Any
 import logging
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -24,21 +28,21 @@ load_dotenv()
 def check_dependencies():
     """Check if required dependencies are available."""
     try:
-        import phonenumbers
         import httpx
-        import openai
+        import feedparser
+        from bs4 import BeautifulSoup
         return True, None
     except ImportError as e:
         return False, str(e)
 
 
-# Check dependencies before importing Lead Sorcerer components
+# Check dependencies before importing components
 deps_ok, error_msg = check_dependencies()
 if not deps_ok:
-    print(f"❌ Could not import Lead Sorcerer orchestrator: {error_msg}")
-    print("   Please ensure the Lead Sorcerer model is properly installed")
+    print(f"❌ Could not import lead sourcing dependencies: {error_msg}")
+    print("   Please ensure all required packages are installed")
     print(
-        "   Run: pip install -r miner_models/lead_sorcerer_main/requirements.txt"
+        "   Run: pip install httpx feedparser beautifulsoup4"
     )
 
     # Provide fallback function that returns empty results
@@ -47,59 +51,70 @@ if not deps_ok:
                         region: str = None) -> List[Dict[str, Any]]:
         """Fallback function when dependencies are missing."""
         print(
-            "⚠️ Lead Sorcerer dependencies not available, returning empty results"
+            "⚠️ Lead sourcing dependencies not available, returning empty results"
         )
         return []
 else:
     # Get the absolute path to the lead_sorcerer_main directory
     lead_sorcerer_dir = Path(__file__).parent.absolute()
     src_path = lead_sorcerer_dir / "src"
-    config_path = lead_sorcerer_dir / "config"
 
-    # Add the src directory to the path so we can import the orchestrator
+    # Add the src directory to the path so we can import our modules
     if str(src_path) not in sys.path:
         sys.path.insert(0, str(src_path))
 
     try:
-        # Try to import with absolute path first
-        import sys
-        old_path = sys.path.copy()
-
-        # Add both the lead_sorcerer_main directory and its src subdirectory
-        sys.path.insert(0, str(lead_sorcerer_dir))
-        sys.path.insert(0, str(src_path))
-
-        from orchestrator import LeadSorcererOrchestrator
-        LEAD_SORCERER_AVAILABLE = True
-
-        # Restore original path but keep our additions
-        for path in [str(lead_sorcerer_dir), str(src_path)]:
-            if path not in old_path and path in sys.path:
-                continue  # Keep our additions
-
+        # Import our dynamic data source modules
+        from sec_edgar import SECEdgarSource
+        from rss_feeds import RSSFeedsSource
+        from job_listings import JobListingsSource
+        from company_scraper import CompanyScraper
+        SOURCES_AVAILABLE = True
     except ImportError as e:
-        print(f"❌ Could not import Lead Sorcerer orchestrator: {e}")
-        print(f"   Tried to import from: {src_path}")
-        print(f"   Directory exists: {src_path.exists()}")
-        if src_path.exists():
-            print(f"   Contents: {list(src_path.iterdir())}")
-        LEAD_SORCERER_AVAILABLE = False
+        print(f"❌ Could not import data source modules: {e}")
+        SOURCES_AVAILABLE = False
 
-    # Suppress verbose logging from the lead sorcerer
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-
-    # ───────────────────────────────────────────────────────────────────
-    #  Load canonical ICP template (must exist)
-    # ───────────────────────────────────────────────────────────────────
+    # Load industry taxonomy for validation
     try:
-        ICP_TEMPLATE_PATH = lead_sorcerer_dir / "icp_config.json"
-        with open(ICP_TEMPLATE_PATH, "r", encoding="utf-8") as _f:
-            BASE_ICP_CONFIG: Dict[str, Any] = json.load(_f)
+        # This would normally be loaded from validator_models/industry_taxonomy.py
+        # For now, we'll use a simplified version
+        INDUSTRY_TAXONOMY = {
+            "Technology": [
+                "Software", "Hardware", "Artificial Intelligence", "Cybersecurity",
+                "Cloud Services", "Data Analytics", "Mobile Apps", "E-commerce"
+            ],
+            "Financial Services": [
+                "Banking", "Insurance", "Investment Management", "Fintech",
+                "Payment Processing", "Lending", "Wealth Management"
+            ],
+            "Healthcare": [
+                "Biotechnology", "Medical Devices", "Pharmaceuticals",
+                "Healthcare Services", "Digital Health", "Medical Diagnostics"
+            ],
+            "Business Services": [
+                "Consulting", "Marketing Services", "Human Resources",
+                "Legal Services", "Accounting", "IT Services"
+            ]
+        }
+        DEFAULT_INDUSTRY = "Business Services"
+        DEFAULT_SUB_INDUSTRY = "Consulting"
     except Exception as e:
-        raise RuntimeError(
-            f"Lead Sorcerer wrapper: required icp_config.json not found or unreadable "
-            f"at {ICP_TEMPLATE_PATH}. Error: {e}") from e
+        print(f"❌ Could not load industry taxonomy: {e}")
+        INDUSTRY_TAXONOMY = {}
+        DEFAULT_INDUSTRY = "Business Services"
+        DEFAULT_SUB_INDUSTRY = "Consulting"
+
+    # Valid employee count ranges
+    VALID_EMPLOYEE_COUNTS = [
+        "0-1", "2-10", "11-50", "51-200", "201-500",
+        "501-1,000", "1,001-5,000", "5,001-10,000", "10,001+"
+    ]
+
+    # Free email domains to exclude
+    FREE_EMAIL_DOMAINS = [
+        "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+        "aol.com", "icloud.com", "protonmail.com", "yandex.com"
+    ]
 
     def create_industry_specific_config(
             industry: str | None = None) -> Dict[str, Any]:
