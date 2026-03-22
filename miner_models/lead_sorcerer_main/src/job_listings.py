@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 # USAJobs.gov API endpoint
 USAJOBS_API_URL = "https://data.usajobs.gov/api/search"
 
+# Government organization patterns to exclude (focus on contractors, universities, hospitals)
+GOVERNMENT_PATTERNS = [
+    'Department of',
+    'US Army',
+    'US Navy',
+    'US Air Force',
+    'Bureau of',
+    'Office of',
+    'Administration for',
+    'Agency for',
+]
+
 # Free email domains to exclude
 FREE_EMAIL_DOMAINS = {
     'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com',
@@ -440,6 +452,12 @@ class JobListingsSource:
                         continue
                     
                     if not organization_name or not position_uri:
+                        continue
+                    
+                    # Skip government organizations - focus on contractors, universities, hospitals
+                    org_name_upper = organization_name.upper()
+                    if any(pattern.upper() in org_name_upper for pattern in GOVERNMENT_PATTERNS):
+                        logger.info(f"Skipping government organization: {organization_name}")
                         continue
                     
                     city, state = self._parse_location(position_location)
