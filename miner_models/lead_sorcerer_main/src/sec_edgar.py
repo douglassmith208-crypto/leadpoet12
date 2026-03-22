@@ -3,8 +3,9 @@ SEC EDGAR data source for Lead Sorcerer.
 
 Fetches recent SEC filings to discover companies and executives.
 Uses the SEC EFTS API to get recent filings from the last 7 days.
+Uses SEC company facts API to get real website, SIC code, and employee count.
 
-Authoritative source: efts.sec.gov
+Authoritative source: efts.sec.gov, data.sec.gov
 """
 
 import asyncio
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 # SEC EFTS API endpoint
 SEC_EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
+
+# SEC Submissions API for company data (CIK padded to 10 digits)
+SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 
 # Free email domains to exclude
 FREE_EMAIL_DOMAINS = {
