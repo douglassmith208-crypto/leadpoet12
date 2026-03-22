@@ -180,6 +180,33 @@ class RSSFeedsSource:
         # Use jane.smith pattern as primary
         return f"{first.lower()}.{last.lower()}@{domain}"
 
+    async def _scrape_company_info(self, company_name: str) -> Optional[Dict[str, Any]]:
+        """Scrape company website and executive team using company_scraper."""
+        try:
+            from .company_scraper import CompanyScraper
+            
+            scraper = CompanyScraper()
+            
+            # Try to construct a likely website URL from company name
+            company_slug = re.sub(r'[^a-zA-Z0-9\s]', '', company_name).lower().replace(' ', '')
+            if not company_slug:
+                return None
+            
+            # Try common TLDs
+            for tld in ['.com', '.org', '.net', '.gov']:
+                website = f"https://{company_slug}{tld}"
+                result = await scraper.scrape_company_info(website)
+                if result and result.get('company_info', {}).get('domain'):
+                    await scraper.close()
+                    return result
+            
+            await scraper.close()
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error scraping company info for {company_name}: {e}")
+            return None
+
     def _extract_location_from_text(self, text: str) -> Dict[str, str]:
         """Extract US city and state from text."""
         location = {'city': '', 'state': '', 'country': '', 'hq_country': '', 'hq_state': '', 'hq_city': ''}
@@ -713,12 +740,27 @@ class RSSFeedsSource:
             if len(valid_leads) >= num_leads:
                 break
             
+            company_name = lead.get('business', '')
+            
+            # Use company scraper to discover real website
+            company_data = await self._scrape_company_info(company_name)
+            if company_data:
+                company_info = company_data.get('company_info', {})
+                domain = company_info.get('domain', '')
+                website = company_info.get('website', '') or (f"https://{domain}" if domain else '')
+                
+                if domain and website:
+                    # Update lead with real website and email
+                    lead['website'] = website
+                    first = lead.get('first', '')
+                    last = lead.get('last', '')
+                    lead['email'] = self._infer_email(first, last, domain)
+            
             # Validate lead before proceeding
             if not self._validate_lead(lead):
                 continue
             
             # Verify LinkedIn profile using ScrapingDog API
-            company_name = lead.get('business', '')
             full_name = lead.get('full_name', '')
             
             linkedin_data = await self._verify_linkedin_profile(company_name, full_name)
