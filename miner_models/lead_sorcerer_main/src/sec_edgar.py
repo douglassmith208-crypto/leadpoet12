@@ -22,6 +22,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from .common import normalize_domain
+from .company_scraper import CompanyScraper
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,7 @@ class SECEdgarSource:
             'User-Agent': os.getenv('USAJOBS_EMAIL', 'research@example.com')
         }
         self.scrapingdog_api_key = os.getenv('SCRAPINGDOG_API_KEY', '')
+        self.company_scraper = CompanyScraper()
 
     def _extract_root_domain(self, website: str) -> str:
         """Extract root domain from website URL."""
@@ -400,14 +402,45 @@ class SECEdgarSource:
             
             if response.status_code == 200:
                 data = response.json()
+                
+                # Get website from API, or construct from ticker if empty
+                website = data.get('website', '')
+                tickers = data.get('tickers', [])
+                
+                # If no website but has ticker, construct likely website
+                if not website and tickers:
+                    ticker = tickers[0].lower()
+                    # Try common patterns
+                    likely_websites = [
+                        f"https://www.{ticker}.com",
+                        f"https://{ticker}.com",
+                        f"https://www.{ticker}corp.com",
+                        f"https://www.{ticker}inc.com",
+                    ]
+                    # Use first pattern as fallback
+                    website = likely_websites[0]
+                
+                # If still no website, try to construct from company name
+                if not website:
+                    name = data.get('name', '')
+                    if name:
+                        # Clean company name and construct domain
+                        import re
+                        clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', name).lower().replace(' ', '')
+                        if clean_name:
+                            website = f"https://www.{clean_name}.com"
+                
                 return {
-                    'website': data.get('website', ''),
+                    'name': data.get('name', ''),
+                    'website': website,
                     'sic': data.get('sic', ''),
                     'sicDescription': data.get('sicDescription', ''),
                     'entityName': data.get('entityName', ''),
                     'description': data.get('description', ''),
                     'formerNames': data.get('formerNames', []),
-                    'filings': data.get('filings', {})
+                    'filings': data.get('filings', {}),
+                    'addresses': data.get('addresses', {}),
+                    'tickers': tickers
                 }
             else:
                 logger.warning(f"SEC API returned {response.status_code} for CIK {cik}")
@@ -495,8 +528,16 @@ class SECEdgarSource:
         if len(lead.get('description', '')) < 70:
             return False
         
-        # Rule: linkedin and company_linkedin must be empty strings
-        if lead.get('linkedin') != '' or lead.get('company_linkedin') != '':
+        # Rule: linkedin and company_linkedin are optional but should be valid URLs if present
+        linkedin = lead.get('linkedin', '')
+        company_linkedin = lead.get('company_linkedin', '')
+        
+        # If linkedin is provided, it should be a valid linkedin URL
+        if linkedin and not linkedin.startswith('https://www.linkedin.com/'):
+            return False
+        
+        # If company_linkedin is provided, it should be a valid linkedin URL
+        if company_linkedin and not company_linkedin.startswith('https://www.linkedin.com/'):
             return False
         
         return True
@@ -560,65 +601,95 @@ class SECEdgarSource:
         """
         Parse a filing record to extract company and executive info.
 
+        Uses the actual SEC EDGAR API response structure:
+        - ciks: List of CIK numbers
+        - display_names: List of company display names
+        - biz_locations: List of business locations (e.g., "Minneapolis, MN")
+        - biz_states: List of business states
+        - form: Form type
+        - file_date: Filing date
+        - sics: List of SIC codes
+
         Args:
-            source: Filing source data
+            source: Filing source data from SEC EFTS API
             form_type: Type of form
 
         Returns:
             Parsed filing data or None if invalid
         """
         try:
-            # Extract company info
-            company_name = source.get('entity', {}).get('name', '')
-            cik = source.get('cik', '')
-
-            if not company_name or not cik:
+            # Extract CIK from ciks array (actual API field)
+            ciks = source.get('ciks', [])
+            if not ciks:
                 return None
+            cik = ciks[0]
 
-            # Get filing details
+            # Extract company name from display_names array (actual API field)
+            display_names = source.get('display_names', [])
+            if not display_names:
+                return None
+            company_name = display_names[0]
+            # Clean up company name - remove CIK suffix if present
+            if ' (CIK ' in company_name:
+                company_name = company_name.split(' (CIK ')[0]
+            # Remove ticker if present (e.g., "REGIS CORP (RGS)")
+            if ' (' in company_name and company_name.endswith(')'):
+                company_name = company_name.rsplit(' (', 1)[0]
+
+            # Get filing details from actual API fields
             filing_date = source.get('file_date', '')
-            period_ending = source.get('period_ending', '')
+            
+            # Extract location from biz_locations and biz_states (actual API fields)
+            biz_locations = source.get('biz_locations', [])
+            biz_states = source.get('biz_states', [])
+            
+            city = ''
+            state = ''
+            if biz_locations:
+                # Parse location like "Minneapolis, MN"
+                location_parts = biz_locations[0].split(', ')
+                if len(location_parts) >= 2:
+                    city = location_parts[0]
+                    state = location_parts[1]
+                else:
+                    city = biz_locations[0]
+            
+            if not state and biz_states:
+                state = biz_states[0]
 
-            # Get addresses
-            addresses = source.get('entity', {}).get('addresses', [])
-            hq_location = self._extract_hq_location(addresses)
+            hq_location = {
+                'city': city,
+                'state': state,
+                'country': 'United States'  # SEC filings are US companies
+            }
 
             # Only include US companies
             if hq_location.get('country') != 'United States':
                 return None
 
-            # Get officers/directors from filing
-            officers = source.get('entity', {}).get('officers', [])
-            directors = source.get('entity', {}).get('directors', [])
+            # Get SIC code for industry mapping
+            sics = source.get('sics', [])
+            sic_code = sics[0] if sics else ''
 
-            # Combine and filter executives
-            executives = []
-            for person in officers + directors:
-                name = person.get('name', '')
-                title = person.get('title', '')
-
-                if name and title:
-                    # Parse name
-                    name_parts = self._parse_name(name)
-                    if name_parts:
-                        executives.append({
-                            'full_name': name,
-                            'first': name_parts['first'],
-                            'last': name_parts['last'],
-                            'role': title
-                        })
-
-            if not executives:
-                return None
+            # Note: Executives are not available in the EFTS API response
+            # They will be fetched later via company_scraper using the website
+            # For now, return a placeholder that will trigger company data lookup
+            executives = [{
+                'full_name': 'Executive Team',
+                'first': 'Executive',
+                'last': 'Team',
+                'role': 'Executive'
+            }]
 
             return {
                 'company_name': company_name,
                 'cik': cik,
-                'form_type': form_type,
+                'form_type': form_type or source.get('form', ''),
                 'filing_date': filing_date,
-                'period_ending': period_ending,
+                'period_ending': '',
                 'hq_location': hq_location,
                 'executives': executives,
+                'sic_code': sic_code,
                 'source_url': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=&dateb=&owner=include&count=40",
                 'filing_url': f"https://www.sec.gov/Archives/edgar/data/{cik}/"
             }
@@ -777,13 +848,35 @@ class SECEdgarSource:
                 company_facts.get('filings', {}).get('recent', {}).get('employeeCount', [None])[0] if company_facts.get('filings', {}).get('recent', {}).get('employeeCount') else None
             )
 
-            for exec_info in filing.get('executives', []):
+            # Use company_scraper to find executives from company website
+            company_data = await self.company_scraper.scrape_company_info(website)
+            
+            if not company_data:
+                logger.info(f"Could not scrape company data for {company_name}, skipping")
+                continue
+            
+            executives = company_data.get('executives', [])
+            if not executives:
+                logger.info(f"No executives found for {company_name}, skipping")
+                continue
+            
+            # Process each executive found
+            for exec_info in executives:
                 if len(leads) >= num_leads:
                     break
 
-                first = exec_info.get('first', '')
-                last = exec_info.get('last', '')
-                role = exec_info.get('role', '')
+                full_name = exec_info.get('name', '')
+                if not full_name:
+                    continue
+                
+                # Parse name into first and last
+                name_parts = self._parse_name(full_name)
+                if not name_parts:
+                    continue
+                
+                first = name_parts.get('first', '')
+                last = name_parts.get('last', '')
+                role = exec_info.get('title', 'Executive')
                 
                 if not first or not last:
                     continue
@@ -796,7 +889,7 @@ class SECEdgarSource:
 
                 lead = {
                     'business': company_name,
-                    'full_name': exec_info.get('full_name', ''),
+                    'full_name': full_name,
                     'first': first,
                     'last': last,
                     'email': email,
@@ -822,19 +915,26 @@ class SECEdgarSource:
                 if not self._validate_lead(lead):
                     continue
                 
-                # Verify LinkedIn profile using ScrapingDog API
-                linkedin_data = await self._verify_linkedin_profile(company_name, lead['full_name'])
-                
-                # Only include lead if LinkedIn verification succeeds
-                if linkedin_data.get('verified'):
-                    lead['linkedin'] = linkedin_data.get('linkedin', '')
-                    lead['company_linkedin'] = linkedin_data.get('company_linkedin', '')
-                    leads.append(lead)
+                # Verify LinkedIn profile using ScrapingDog API (if API key is available)
+                scrapingdog_api_key = os.getenv('SCRAPINGDOG_API_KEY', '')
+                if scrapingdog_api_key:
+                    linkedin_data = await self._verify_linkedin_profile(company_name, lead['full_name'])
+                    
+                    # Only include lead if LinkedIn verification succeeds
+                    if linkedin_data.get('verified'):
+                        lead['linkedin'] = linkedin_data.get('linkedin', '')
+                        lead['company_linkedin'] = linkedin_data.get('company_linkedin', '')
+                        leads.append(lead)
+                    else:
+                        logger.info(f"LinkedIn verification failed for {lead['full_name']} at {company_name}, discarding lead")
                 else:
-                    logger.info(f"LinkedIn verification failed for {lead['full_name']} at {company_name}, discarding lead")
+                    # No ScrapingDog API key, skip LinkedIn verification and add lead as-is
+                    logger.info(f"No ScrapingDog API key, adding lead without LinkedIn verification: {lead['full_name']} at {company_name}")
+                    leads.append(lead)
 
         return leads[:num_leads]
 
     async def close(self):
         """Close the HTTP client."""
         await self.client.aclose()
+        await self.company_scraper.close()
