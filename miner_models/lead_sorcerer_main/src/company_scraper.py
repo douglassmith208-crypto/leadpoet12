@@ -11,6 +11,7 @@ Authoritative sources:
 
 import asyncio
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
@@ -67,7 +68,16 @@ class CompanyScraper:
                 website = f'https://{website}'
 
             # Get main page
-            response = await self.client.get(website, headers=self.headers)
+            scrapingdog_api_key = os.getenv('SCRAPINGDOG_API_KEY', '')
+            response = await self.client.get(
+                "https://api.scrapingdog.com/scrape",
+                params={
+                    'api_key': scrapingdog_api_key,
+                    'url': website,
+                    'dynamic': 'true'
+                },
+                timeout=60.0
+            )
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -159,7 +169,16 @@ class CompanyScraper:
             List of executive dictionaries
         """
         try:
-            response = await self.client.get(url, headers=self.headers)
+            scrapingdog_api_key = os.getenv('SCRAPINGDOG_API_KEY', '')
+            response = await self.client.get(
+                "https://api.scrapingdog.com/scrape",
+                params={
+                    'api_key': scrapingdog_api_key,
+                    'url': url,
+                    'dynamic': 'true'
+                },
+                timeout=60.0
+            )
             response.raise_for_status()
 
             soup = BeautifulSoup(response.text, 'html.parser')

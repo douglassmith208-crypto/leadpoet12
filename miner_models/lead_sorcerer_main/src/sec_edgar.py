@@ -210,7 +210,7 @@ class SECEdgarSource:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
         self.headers = {
-            'User-Agent': 'LeadSorcerer/1.0 (research@example.com)'
+            'User-Agent': os.getenv('USAJOBS_EMAIL', 'research@example.com')
         }
         self.scrapingdog_api_key = os.getenv('SCRAPINGDOG_API_KEY', '')
 
@@ -517,39 +517,42 @@ class SECEdgarSource:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
 
-        # Query for recent 10-K, 10-Q, 8-K, DEF 14A filings
+        # Query for recent 10-K, 10-Q, 8-K, DEF 14A filings with a single API call
         form_types = ['10-K', '10-Q', '8-K', 'DEF 14A', 'SC 13G', '13F-HR']
+        forms_param = ','.join(form_types)
+        
+        try:
+            params = {
+                'q': '"chief executive" OR "chief financial" OR "chief operating" OR "president" OR "appointed" OR "named"',
+                'forms': forms_param,
+                'dateRange': 'custom',
+                'startdt': start_date.strftime('%Y-%m-%d'),
+                'enddt': end_date.strftime('%Y-%m-%d'),
+                'page': 1,
+                'pageSize': 100
+            }
 
-        for form_type in form_types:
-            try:
-                params = {
-                    'q': f'formType:"{form_type}"',
-                    'dateRange': 'custom',
-                    'startdt': start_date.strftime('%Y-%m-%d'),
-                    'enddt': end_date.strftime('%Y-%m-%d'),
-                    'page': 1,
-                    'pageSize': 100
-                }
+            response = await self.client.get(
+                SEC_EFTS_URL,
+                params=params,
+                headers=self.headers
+            )
 
-                response = await self.client.get(
-                    SEC_EFTS_URL,
-                    params=params,
-                    headers=self.headers
-                )
+            if response.status_code == 200:
+                data = response.json()
+                hits = data.get('hits', {}).get('hits', [])
 
-                if response.status_code == 200:
-                    data = response.json()
-                    hits = data.get('hits', {}).get('hits', [])
+                for hit in hits:
+                    source = hit.get('_source', {})
+                    # Extract form type from the hit to pass to _parse_filing
+                    hit_form_type = hit.get('_source', {}).get('root_forms', [''])[0]
+                    filing = self._parse_filing(source, hit_form_type)
+                    if filing:
+                        filings.append(filing)
 
-                    for hit in hits:
-                        source = hit.get('_source', {})
-                        filing = self._parse_filing(source, form_type)
-                        if filing:
-                            filings.append(filing)
-
-            except Exception as e:
-                logger.warning(f"Error fetching {form_type} filings: {e}")
-                continue
+        except Exception as e:
+            logger.warning(f"Error fetching filings: {e}")
+            
 
         return filings
 

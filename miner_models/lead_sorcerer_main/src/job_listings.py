@@ -122,7 +122,8 @@ US_STATES = {
 class JobListingsSource:
     """Source for fetching company data from USAJobs.gov API."""
 
-    def __init__(self, user_email: str = "research@example.com"):
+    def __init__(self, user_email: str = None):
+        user_email = user_email or os.getenv('USAJOBS_EMAIL', 'research@example.com')
         self.client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
         self.headers = {
             'Host': 'data.usajobs.gov',

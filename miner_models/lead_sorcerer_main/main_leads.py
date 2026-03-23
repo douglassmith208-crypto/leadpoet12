@@ -41,7 +41,7 @@ async def get_leads(num_leads: int, industry: str = None, region: str = None) ->
     per_source = max(num_leads // 3, 3)
 
     # Import source classes from the src package
-    from src import SECEdgarSource, RSSFeedsSource, JobListingsSource
+    from miner_models.lead_sorcerer_main.src import SECEdgarSource, RSSFeedsSource, JobListingsSource
 
     # Source from SEC EDGAR - highest reputation scores
     try:
