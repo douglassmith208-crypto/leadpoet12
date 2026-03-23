@@ -555,13 +555,16 @@ class SECEdgarSource:
             return None
         try:
             acc_formatted = accession_number.replace('-', '')
-            filing_index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_formatted}/{accession_number}-index.htm"
+            filing_index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_formatted}/{accession_number}.txt"
             response = await self.client.get(filing_index_url, headers=self.headers, timeout=15.0)
             if response.status_code != 200:
                 return None
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(response.text, 'html.parser')
-            text = soup.get_text()[:2000]
+            full_text = response.text
+            idx = full_text.find('5.02')
+            if idx > 0:
+                text = full_text[idx:idx+2000]
+            else:
+                text = full_text[:2000]
             prompt = f"""Extract executive appointment information from this SEC filing. Return JSON only.
 
 SEC Filing text: {text}
@@ -759,7 +762,8 @@ Rules:
                 'executives': executives,
                 'sic_code': sic_code,
                 'source_url': f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type=&dateb=&owner=include&count=40",
-                'filing_url': f"https://www.sec.gov/Archives/edgar/data/{cik}/"
+                'filing_url': f"https://www.sec.gov/Archives/edgar/data/{cik}/",
+                'adsh': source.get('adsh', '')
             }
 
         except Exception as e:
