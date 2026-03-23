@@ -456,6 +456,12 @@ class SECEdgarSource:
         
         Returns True if lead passes all validation rules.
         """
+        # Fix hq_state for US companies
+        if lead.get('country') == 'United States' and not lead.get('hq_state') and lead.get('state'):
+            lead['hq_state'] = lead['state']
+        if lead.get('hq_country') == 'United States' and not lead.get('hq_state'):
+            return False
+        
         # Check required fields
         required_fields = [
             'business', 'full_name', 'email', 'role', 'website',
@@ -541,6 +547,68 @@ class SECEdgarSource:
             return False
         
         return True
+
+    async def _extract_executive_from_filing(self, cik: str, accession_number: str) -> Optional[Dict[str, str]]:
+        """Extract executive name and role from SEC filing document using OpenRouter LLM."""
+        openrouter_key = os.getenv('OPENROUTER_KEY', '')
+        if not openrouter_key or not cik or not accession_number:
+            return None
+        try:
+            acc_formatted = accession_number.replace('-', '')
+            filing_index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_formatted}/{accession_number}-index.htm"
+            response = await self.client.get(filing_index_url, headers=self.headers, timeout=15.0)
+            if response.status_code != 200:
+                return None
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            text = soup.get_text()[:2000]
+            prompt = f"""Extract executive appointment information from this SEC filing. Return JSON only.
+
+SEC Filing text: {text}
+
+Return this exact JSON:
+{{"full_name": "executive full name or empty string", "role": "job title or empty string"}}
+
+Rules:
+- Only extract if there is a named executive being appointed or announced
+- Return empty strings if not found"""
+            llm_response = await self.client.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {openrouter_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'openai/gpt-4o-mini',
+                    'temperature': 0.1,
+                    'messages': [{'role': 'user', 'content': prompt}]
+                },
+                timeout=15.0
+            )
+            if llm_response.status_code != 200:
+                return None
+            data = llm_response.json()
+            content = data.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+            if content.startswith('```'):
+                content = content.strip('`').lstrip('json').strip()
+            import json as json_lib
+            extracted = json_lib.loads(content)
+            full_name = extracted.get('full_name', '').strip()
+            role = extracted.get('role', '').strip()
+            if not full_name or not role:
+                return None
+            name_parts = full_name.split()
+            if len(name_parts) < 2:
+                return None
+            return {
+                'full_name': full_name,
+                'first': name_parts[0],
+                'last': name_parts[-1],
+                'role': role
+            }
+        except Exception as e:
+            logger.warning(f"SEC filing LLM extraction failed: {e}")
+            return None
 
     async def get_recent_filings(self, days_back: int = 7) -> List[Dict[str, Any]]:
         """
@@ -848,89 +916,78 @@ class SECEdgarSource:
                 company_facts.get('filings', {}).get('recent', {}).get('employeeCount', [None])[0] if company_facts.get('filings', {}).get('recent', {}).get('employeeCount') else None
             )
 
-            # Use company_scraper to find executives from company website
-            company_data = await self.company_scraper.scrape_company_info(website)
-            
-            if not company_data:
-                logger.info(f"Could not scrape company data for {company_name}, skipping")
+            # Use LLM to extract executive from filing document
+            try:
+                exec_info = await asyncio.wait_for(
+                    self._extract_executive_from_filing(cik, filing.get('adsh', '')),
+                    timeout=20.0
+                )
+            except asyncio.TimeoutError:
+                logger.info(f"LLM extraction timed out for {company_name}, skipping")
                 continue
             
-            executives = company_data.get('executives', [])
-            if not executives:
-                logger.info(f"No executives found for {company_name}, skipping")
+            if not exec_info:
+                logger.info(f"No executive found in filing for {company_name}, skipping")
                 continue
             
-            # Process each executive found
-            for exec_info in executives:
-                if len(leads) >= num_leads:
-                    break
+            first = exec_info.get('first', '')
+            last = exec_info.get('last', '')
+            full_name = exec_info.get('full_name', '')
+            role = exec_info.get('role', 'Executive')
+            
+            if not first or not last:
+                continue
 
-                full_name = exec_info.get('name', '')
-                if not full_name:
-                    continue
-                
-                # Parse name into first and last
-                name_parts = self._parse_name(full_name)
-                if not name_parts:
-                    continue
-                
-                first = name_parts.get('first', '')
-                last = name_parts.get('last', '')
-                role = exec_info.get('title', 'Executive')
-                
-                if not first or not last:
-                    continue
+            # Infer email using real domain
+            email = self.infer_email(first, last, domain)
+            
+            if not email:
+                continue
 
-                # Infer email using real domain
-                email = self.infer_email(first, last, domain)
+            lead = {
+                'business': company_name,
+                'full_name': full_name,
+                'first': first,
+                'last': last,
+                'email': email,
+                'role': role,
+                'website': f"https://{domain}",
+                'industry': industry,
+                'sub_industry': sub_industry,
+                'country': 'United States',
+                'state': hq_location.get('state', ''),
+                'city': hq_location.get('city', ''),
+                'linkedin': '',  # Set to empty string as required
+                'company_linkedin': '',  # Set to empty string as required
+                'source_url': filing.get('source_url', ''),
+                'description': description,
+                'employee_count': employee_count,
+                'hq_country': 'United States',
+                'hq_state': hq_location.get('state', ''),
+                'hq_city': hq_location.get('city', ''),
+                'cik': cik
+            }
+            
+            # Validate lead before proceeding to LinkedIn verification
+            if not self._validate_lead(lead):
+                continue
+            
+            # Verify LinkedIn profile using ScrapingDog API (if API key is available)
+            scrapingdog_api_key = os.getenv('SCRAPINGDOG_API_KEY', '')
+            if scrapingdog_api_key:
+                linkedin_data = await self._verify_linkedin_profile(company_name, lead['full_name'])
                 
-                if not email:
-                    continue
-
-                lead = {
-                    'business': company_name,
-                    'full_name': full_name,
-                    'first': first,
-                    'last': last,
-                    'email': email,
-                    'role': role,
-                    'website': f"https://{domain}",
-                    'industry': industry,
-                    'sub_industry': sub_industry,
-                    'country': 'United States',
-                    'state': hq_location.get('state', ''),
-                    'city': hq_location.get('city', ''),
-                    'linkedin': '',  # Set to empty string as required
-                    'company_linkedin': '',  # Set to empty string as required
-                    'source_url': filing.get('source_url', ''),
-                    'description': description,
-                    'employee_count': employee_count,
-                    'hq_country': 'United States',
-                    'hq_state': hq_location.get('state', ''),
-                    'hq_city': hq_location.get('city', ''),
-                    'cik': cik
-                }
-                
-                # Validate lead before proceeding to LinkedIn verification
-                if not self._validate_lead(lead):
-                    continue
-                
-                # Verify LinkedIn profile using ScrapingDog API (if API key is available)
-                scrapingdog_api_key = os.getenv('SCRAPINGDOG_API_KEY', '')
-                if scrapingdog_api_key:
-                    linkedin_data = await self._verify_linkedin_profile(company_name, lead['full_name'])
-                    
-                    # Only include lead if LinkedIn verification succeeds
-                    if linkedin_data.get('verified'):
-                        lead['linkedin'] = linkedin_data.get('linkedin', '')
-                        lead['company_linkedin'] = linkedin_data.get('company_linkedin', '')
-                        leads.append(lead)
-                    else:
-                        logger.info(f"LinkedIn verification failed for {lead['full_name']} at {company_name}, discarding lead")
-                else:
-                    # No ScrapingDog API key, skip LinkedIn verification and add lead as-is
-                    logger.info(f"No ScrapingDog API key, adding lead without LinkedIn verification: {lead['full_name']} at {company_name}")
+                # Only include lead if LinkedIn verification succeeds
+                if linkedin_data.get('verified'):
+                    lead['linkedin'] = linkedin_data.get('linkedin', '')
+                    lead['company_linkedin'] = linkedin_data.get('company_linkedin', '')
                     leads.append(lead)
+                else:
+                    logger.info(f"LinkedIn verification failed for {lead['full_name']} at {company_name}, discarding lead")
+            else:
+                # No ScrapingDog API key, skip LinkedIn verification and add lead as-is
+                logger.info(f"No ScrapingDog API key, adding lead without LinkedIn verification: {lead['full_name']} at {company_name}")
+                leads.append(lead)
 
         return leads[:num_leads]
 
