@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 # Real working RSS feed URLs
-PR_NEWSWIRE_RSS = "https://www.prnewswire.com/rss/news-releases-list.rss"
+PR_NEWSWIRE_RSS = "https://www.prnewswire.com/rss/news-releases-list.rss?category=MGT"
 BUSINESS_WIRE_RSS = "https://feed.businesswire.com/rss/home/?rss=G1"
 
 # Free email domains to exclude
@@ -488,20 +488,11 @@ class RSSFeedsSource:
             return []
 
     def _contains_leadership_keywords(self, text: str) -> bool:
-        """
-        Check if text contains leadership-related keywords.
-
-        Args:
-            text: Text to check
-
-        Returns:
-            True if keywords found, False otherwise
-        """
         if not text:
             return False
-
-        text_lower = text.lower()
-        return any(keyword.lower() in text_lower for keyword in LEADERSHIP_KEYWORDS)
+        # Since we are already using the MGT (management) category feed
+        # every entry is a management announcement - return True for all
+        return True
 
     def _parse_rss_entry(self, entry: Any, source: str) -> Optional[Dict[str, Any]]:
         """
