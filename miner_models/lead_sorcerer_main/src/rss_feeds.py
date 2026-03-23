@@ -336,6 +336,12 @@ class RSSFeedsSource:
         
         Returns True if lead passes all validation rules.
         """
+        # Fix hq_state for US companies
+        if lead.get('country') == 'United States' and not lead.get('hq_state') and lead.get('state'):
+            lead['hq_state'] = lead['state']
+        if lead.get('hq_country') == 'United States' and not lead.get('hq_state'):
+            return False
+        
         # Check required fields
         required_fields = [
             'business', 'full_name', 'email', 'role', 'website',
@@ -428,16 +434,16 @@ class RSSFeedsSource:
 
         # Get announcements from each feed
         feeds = [
-            ('PR Newswire', PR_NEWSWIRE_RSS),
+            ('PR Newswire', 'https://www.prnewswire.com/rss/news-releases-list.rss?category=MGT'),
+            ('GlobeNewswire', 'https://www.globenewswire.com/RssFeed/subjectcode/74-Management+Changes'),
             ('Business Wire', BUSINESS_WIRE_RSS),
-            # Crunchbase would require a real API key
         ]
 
         for feed_name, feed_url in feeds:
             try:
                 feed_entries = await self._parse_rss_feed(feed_url, days_back)
                 for entry in feed_entries:
-                    lead = self._parse_rss_entry(entry, feed_name)
+                    lead = await self._parse_rss_entry(entry, feed_name)
                     if lead:
                         leads.append(lead)
             except Exception as e:
@@ -494,7 +500,7 @@ class RSSFeedsSource:
         # every entry is a management announcement - return True for all
         return True
 
-    def _parse_rss_entry(self, entry: Any, source: str) -> Optional[Dict[str, Any]]:
+    async def _parse_rss_entry(self, entry: Any, source: str) -> Optional[Dict[str, Any]]:
         """
         Parse an RSS entry to extract lead information.
 
@@ -510,30 +516,27 @@ class RSSFeedsSource:
             summary = getattr(entry, 'summary', '')
             link = getattr(entry, 'link', '')
 
-            # Extract company and executive info from entry using pattern matching
-            info = self._extract_info_from_text(f"{title} {summary}")
+            # Extract company and executive info from entry using LLM
+            info = await self._extract_info_from_text(f"{title} {summary}")
             if not info:
-                return None  # Discard entry entirely if pattern matching fails
+                return None  # Discard entry entirely if extraction fails
 
-            # Validate that it's a US company
-            if info.get('country') != 'United States':
+            # Validate that it's a US company (must have state or city)
+            if not info.get('state') and not info.get('city'):
                 return None
             
             company_name = info.get('company', '')
             if not company_name:
                 return None
 
-            # Try to find company website - we need this for validation
-            # Since we don't have a real scraper call here, we'll construct a basic domain
-            # The real validation will happen in get_leads with company_scraper
-            website = info.get('website', '')
-            if not website:
-                # Try to construct a plausible website from company name
+            # Use LLM-extracted domain first, fallback to constructed domain
+            domain = info.get('domain', '')
+            if not domain:
                 company_slug = re.sub(r'[^a-zA-Z0-9\s]', '', company_name).lower().replace(' ', '')
                 if company_slug:
-                    website = f"https://{company_slug}.com"
+                    domain = f"{company_slug}.com"
+            website = f"https://{domain}" if domain else ''
 
-            domain = self._extract_root_domain(website)
             if not domain:
                 return None
 
@@ -560,7 +563,7 @@ class RSSFeedsSource:
                 'last': last,
                 'email': email,
                 'role': info.get('role', 'Executive'),
-                'website': f"https://{domain}",
+                'website': website,
                 'industry': 'Business Services',  # Will be updated after company lookup
                 'sub_industry': 'Consulting',  # Will be updated after company lookup
                 'country': 'United States',
@@ -581,110 +584,85 @@ class RSSFeedsSource:
             logger.warning(f"Error parsing RSS entry: {e}")
             return None
 
-    def _extract_info_from_text(self, text: str) -> Optional[Dict[str, str]]:
-        """
-        Extract company, executive, and role info from RSS entry text using pattern matching.
-        
-        Supports patterns like:
-        - "Acme Corp appoints Jane Smith as CEO"
-        - "Jane Smith joins Acme Corp as President"
-        - "Acme Corp names Jane Smith Chief Revenue Officer"
-        - "Jane Smith promoted to VP of Sales at Acme Corp"
-        - "Acme Corp announces Jane Smith as new Chief Executive"
-        
-        Args:
-            text: RSS entry text (title + summary) to extract from
-            
-        Returns:
-            Dictionary with extracted info or None if no valid data found
-        """
-        if not text or len(text) < 20:
+    async def _extract_info_from_text(self, text: str) -> Optional[Dict[str, str]]:
+        """Extract company, executive and role info from RSS entry text using OpenRouter LLM."""
+        openrouter_key = os.getenv('OPENROUTER_KEY', '')
+        if not openrouter_key or not text or len(text) < 20:
             return None
-        
-        # Clean up text for parsing
-        clean_text = text.strip()
-        
-        # Pattern definitions for leadership announcements
-        # These capture company name before leadership verbs, person after verb, and role
-        
-        patterns = [
-            # Pattern 1: "Company appoints/names/hires/promotes/announces Person as/to Role"
-            # e.g., "Acme Corp appoints Jane Smith as CEO" or "Acme Corp names Jane Smith Chief Revenue Officer"
-            (r'([A-Z][a-zA-Z\s&]+(?:Corp|Corporation|Inc|LLC|Ltd|Company|Co|Group|Partners|Technologies|Solutions|Systems|Services|International|Industries|Enterprises|Holdings|Global|Media|Digital|Labs|Ventures|Capital|Advisors|Associates|Network|Health|Energy|Financial|Tech|Software|Analytics|Consulting|Management|Development|Properties|Realty|Group|Partners))\s+(?:appoints|names|hires|has\s+hired|promotes|announces|has\s+appointed|has\s+named|has\s+promoted)\s+([A-Z][a-zA-Z\s\-\.]+(?:\s+[A-Z][a-zA-Z\-\.]+)?)\s+(?:as|to|the\s+new)?\s*(?:its\s+)?(?:new\s+)?(?:Vice\s+President|VP|Chief\s+\w+|CEO|CFO|COO|CTO|CMO|CRO|President|Director|Manager|Head|Lead|Executive|Officer|Senior\s+\w+|General\s+\w+|Managing\s+\w+|[A-Z][a-zA-Z\s]+(?:Officer|Director|Manager|Lead|Head|President|VP|Executive))(?:\s+of\s+[A-Z][a-zA-Z\s]+)?', 1, 2),
-            
-            # Pattern 2: "Person joins Company as Role"
-            # e.g., "Jane Smith joins Acme Corp as President"
-            (r'([A-Z][a-zA-Z\s\-\.]+(?:\s+[A-Z][a-zA-Z\-\.]+){1,2})\s+(?:joins|is\s+joining|has\s+joined|will\s+join)\s+([A-Z][a-zA-Z\s&]+(?:Corp|Corporation|Inc|LLC|Ltd|Company|Co|Group|Partners|Technologies|Solutions|Systems|Services|International|Industries|Enterprises|Holdings|Global|Media|Digital|Labs|Ventures|Capital|Advisors|Associates|Network|Health|Energy|Financial|Tech|Software|Analytics|Consulting|Management|Development|Properties|Realty|Group|Partners))\s+(?:as|to\s+(?:become|serve\s+as))?\s*(?:its\s+)?(?:new\s+)?(?:Vice\s+President|VP|Chief\s+\w+|CEO|CFO|COO|CTO|CMO|CRO|President|Director|Manager|Head|Lead|Executive|Officer|Senior\s+\w+|General\s+\w+|Managing\s+\w+|[A-Z][a-zA-Z\s]+(?:Officer|Director|Manager|Lead|Head|President|VP|Executive))(?:\s+of\s+[A-Z][a-zA-Z\s]+)?', 2, 1),  # Swap positions
-            
-            # Pattern 3: "Person promoted to Role at Company"
-            # e.g., "Jane Smith promoted to VP of Sales at Acme Corp"
-            (r'([A-Z][a-zA-Z\s\-\.]+(?:\s+[A-Z][a-zA-Z\-\.]+){1,2})\s+(?:promoted|has\s+been\s+promoted|elevated|has\s+been\s+elevated)\s+(?:to|as)\s+(?:its\s+)?(?:new\s+)?(?:Vice\s+President|VP|Chief\s+\w+|CEO|CFO|COO|CTO|CMO|CRO|President|Director|Manager|Head|Lead|Executive|Officer|Senior\s+\w+|General\s+\w+|Managing\s+\w+|[A-Z][a-zA-Z\s]+(?:Officer|Director|Manager|Lead|Head|President|VP|Executive))(?:\s+of\s+[A-Z][a-zA-Z\s]+)?\s+(?:at|with|of)\s+([A-Z][a-zA-Z\s&]+(?:Corp|Corporation|Inc|LLC|Ltd|Company|Co|Group|Partners|Technologies|Solutions|Systems|Services|International|Industries|Enterprises|Holdings|Global|Media|Digital|Labs|Ventures|Capital|Advisors|Associates|Network|Health|Energy|Financial|Tech|Software|Analytics|Consulting|Management|Development|Properties|Realty|Group|Partners))', 2, 1),  # Swap positions
-            
-            # Pattern 4: "Company welcomes Person as Role"
-            (r'([A-Z][a-zA-Z\s&]+(?:Corp|Corporation|Inc|LLC|Ltd|Company|Co|Group|Partners|Technologies|Solutions|Systems|Services|International|Industries|Enterprises|Holdings|Global|Media|Digital|Labs|Ventures|Capital|Advisors|Associates|Network|Health|Energy|Financial|Tech|Software|Analytics|Consulting|Management|Development|Properties|Realty|Group|Partners))\s+(?:welcomes|is\s+pleased\s+to\s+welcome|has\s+welcomed)\s+([A-Z][a-zA-Z\s\-\.]+(?:\s+[A-Z][a-zA-Z\-\.]+)?)\s+(?:as|to\s+(?:serve\s+as|become))\s*(?:its\s+)?(?:new\s+)?(?:Vice\s+President|VP|Chief\s+\w+|CEO|CFO|COO|CTO|CMO|CRO|President|Director|Manager|Head|Lead|Executive|Officer|Senior\s+\w+|General\s+\w+|Managing\s+\w+|[A-Z][a-zA-Z\s]+(?:Officer|Director|Manager|Lead|Head|President|VP|Executive))(?:\s+of\s+[A-Z][a-zA-Z\s]+)?', 1, 2),
-            
-            # Pattern 5: Simpler pattern - "Company - Person Appointed as Role"
-            (r'([A-Z][a-zA-Z\s&]+(?:Corp|Corporation|Inc|LLC|Ltd|Company|Co|Group|Partners|Technologies|Solutions|Systems|Services|International|Industries|Enterprises|Holdings|Global))\s*[\-\–]\s*([A-Z][a-zA-Z\s\-\.]+(?:\s+[A-Z][a-zA-Z\-\.]+)?)\s+(?:Appointed|Named|Hired|Promoted|Elected|Selected)\s+(?:as|to|as\s+its)?\s*(?:new\s+)?(?:Vice\s+President|VP|Chief\s+\w+|CEO|CFO|COO|CTO|CMO|CRO|President|Director|Manager|Head|Lead|Executive|Officer|Senior\s+\w+|General\s+\w+|Managing\s+\w+)', 1, 2),
-        ]
-        
-        extracted = None
-        
-        for pattern, company_group, name_group in patterns:
-            match = re.search(pattern, clean_text, re.IGNORECASE)
-            if match:
-                company = match.group(company_group).strip()
-                person = match.group(name_group).strip()
-                
-                # Clean up company name - remove common suffixes for cleaner display
-                company = re.sub(r'\s+(?:Inc\.?|LLC|Ltd\.?|Corp\.?|Corporation|Co\.?|Company)$', '', company, flags=re.IGNORECASE).strip()
-                
-                # Extract role from the match text context
-                role = self._extract_role(clean_text, person)
-                
-                if company and person and role:
-                    extracted = {
-                        'company': company,
-                        'person': person,
-                        'role': role
-                    }
-                    break
-        
-        if not extracted:
+        try:
+            prompt = f"""Extract information from this press release. Return JSON only, no other text.
+
+Press release: {text[:800]}
+
+Return this exact JSON structure:
+{{"company": "company name or empty string", "full_name": "executive full name or empty string", "role": "job title or empty string", "city": "US city or empty string", "state": "US 2-letter state code or empty string", "domain": "company website domain like acme.com or empty string"}}
+
+Rules:
+- Only extract if this is about a US company
+- Only extract if there is a named executive with a specific role title
+- Return empty strings if information is not present
+- state must be 2-letter US state code like CA, NY, TX
+- domain should be root domain only like acme.com not www.acme.com or https://acme.com
+- If you are not confident about the domain leave it empty"""
+
+            response = await self.client.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {openrouter_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'openai/gpt-4o-mini',
+                    'temperature': 0.1,
+                    'messages': [
+                        {'role': 'user', 'content': prompt}
+                    ]
+                },
+                timeout=15.0
+            )
+            if response.status_code != 200:
+                logger.warning(f"OpenRouter API error: {response.status_code}")
+                return None
+            data = response.json()
+            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+            if not content:
+                return None
+            content = content.strip()
+            if content.startswith('```'):
+                content = content.strip('`').lstrip('json').strip()
+            import json as json_lib
+            extracted = json_lib.loads(content)
+            company = extracted.get('company', '').strip()
+            full_name = extracted.get('full_name', '').strip()
+            role = extracted.get('role', '').strip()
+            city = extracted.get('city', '').strip()
+            state = extracted.get('state', '').strip()
+            domain = extracted.get('domain', '').strip()
+            if not company or not full_name or not role:
+                return None
+            name_parts = full_name.split()
+            if len(name_parts) < 2:
+                return None
+            first = name_parts[0]
+            last = name_parts[-1]
+            country = 'United States' if (state or city) else ''
+            return {
+                'company': company,
+                'full_name': full_name,
+                'first': first,
+                'last': last,
+                'role': role,
+                'city': city,
+                'state': state,
+                'country': country,
+                'hq_country': country,
+                'hq_state': state,
+                'hq_city': city,
+                'domain': domain,
+            }
+        except Exception as e:
+            logger.warning(f"OpenRouter extraction failed: {e}")
             return None
-        
-        # Parse full name into first and last
-        person_name = extracted['person']
-        name_parts = person_name.split()
-        
-        if len(name_parts) < 2:
-            return None
-        
-        first_name = name_parts[0]
-        last_name = ' '.join(name_parts[1:]) if len(name_parts) > 2 else name_parts[-1]
-        
-        # Remove titles from names
-        titles = ['Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Prof.', 'Hon.', 'Sir', 'Dame', 
-                  'Jr.', 'Sr.', 'III', 'II', 'IV']
-        for title in titles:
-            first_name = first_name.replace(title, '').strip()
-            last_name = last_name.replace(title, '').strip()
-        
-        # Extract location
-        location = self._extract_location_from_text(clean_text)
-        
-        return {
-            'company': extracted['company'],
-            'full_name': person_name,
-            'first': first_name,
-            'last': last_name,
-            'role': extracted['role'],
-            'state': location['state'],
-            'city': location['city'],
-            'country': location['country'] or 'United States',
-            'hq_country': location['hq_country'] or 'United States',
-            'hq_state': location['hq_state'],
-            'hq_city': location['hq_city'],
-        }
     
     def _extract_role(self, text: str, person_name: str) -> str:
         """Extract role/title from text based on person name context."""
@@ -746,19 +724,8 @@ class RSSFeedsSource:
             
             company_name = lead.get('business', '')
             
-            # Use company scraper to discover real website
-            company_data = await self._scrape_company_info(company_name)
-            if company_data:
-                company_info = company_data.get('company_info', {})
-                domain = company_info.get('domain', '')
-                website = company_info.get('website', '') or (f"https://{domain}" if domain else '')
-                
-                if domain and website:
-                    # Update lead with real website and email
-                    lead['website'] = website
-                    first = lead.get('first', '')
-                    last = lead.get('last', '')
-                    lead['email'] = self._infer_email(first, last, domain)
+            # Skip company scraper - LLM already extracted the domain
+            # Use the website already set in the lead directly
             
             # Validate lead before proceeding
             if not self._validate_lead(lead):
