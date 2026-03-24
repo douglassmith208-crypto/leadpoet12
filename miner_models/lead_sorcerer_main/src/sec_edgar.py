@@ -316,71 +316,45 @@ class SECEdgarSource:
         except (ValueError, TypeError):
             return "11-50"  # Default
 
-    async def _verify_linkedin_profile(self, company: str, full_name: str) -> Dict[str, str]:
-        """Verify LinkedIn profile using ScrapingDog API."""
-        if not self.scrapingdog_api_key or not company or not full_name:
+       async def _verify_linkedin_profile(self, company: str, full_name: str) -> Dict[str, str]:
+        import requests as req_lib
+        serper_api_key = os.getenv('SERPER_API_KEY', '')
+        if not serper_api_key or not company or not full_name:
             return {'linkedin': '', 'company_linkedin': '', 'verified': False}
-        
         try:
-            # Parse name for search
-            name_parts = full_name.split()
-            if len(name_parts) < 2:
-                return {'linkedin': '', 'company_linkedin': '', 'verified': False}
-            
-            first_name = name_parts[0]
-            last_name = name_parts[-1]
-            
-            # Search person by name and company
-            person_search_url = "https://api.scrapingdog.com/linkedin"
-            params = {
-                'api_key': self.scrapingdog_api_key,
-                'type': 'search',
-                'query': f'{first_name} {last_name} {company}',
-                'results': 5
-            }
-            
-            response = await self.client.get(person_search_url, params=params, timeout=30.0)
-            
+            headers = {'X-API-KEY': serper_api_key, 'Content-Type': 'application/json'}
+            person_response = req_lib.post(
+                'https://google.serper.dev/search',
+                headers=headers,
+                json={'q': f'"{full_name}" "{company}" site:linkedin.com/in', 'num': 5},
+                timeout=15
+            )
             person_linkedin = ''
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get('results', [])
-                for result in results:
-                    if result.get('profile_url'):
-                        person_linkedin = result.get('profile_url', '')
+            if person_response.status_code == 200:
+                for r in person_response.json().get('organic', []):
+                    if 'linkedin.com/in/' in r.get('link', ''):
+                        person_linkedin = r['link'].split('?')[0]
                         break
-            
-            # Search company
-            company_search_url = "https://api.scrapingdog.com/linkedin"
-            params = {
-                'api_key': self.scrapingdog_api_key,
-                'type': 'company',
-                'query': company,
-                'results': 3
-            }
-            
-            response = await self.client.get(company_search_url, params=params, timeout=30.0)
-            
+            company_response = req_lib.post(
+                'https://google.serper.dev/search',
+                headers=headers,
+                json={'q': f'"{company}" site:linkedin.com/company', 'num': 3},
+                timeout=15
+            )
             company_linkedin = ''
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get('results', [])
-                for result in results:
-                    if result.get('company_url'):
-                        company_linkedin = result.get('company_url', '')
+            if company_response.status_code == 200:
+                for r in company_response.json().get('organic', []):
+                    if 'linkedin.com/company/' in r.get('link', ''):
+                        company_linkedin = r['link'].split('?')[0]
                         break
-            
-            # Only verified if both found
             verified = bool(person_linkedin and company_linkedin)
-            
             return {
                 'linkedin': person_linkedin if verified else '',
                 'company_linkedin': company_linkedin if verified else '',
                 'verified': verified
             }
-            
         except Exception as e:
-            logger.warning(f"LinkedIn verification failed: {e}")
+            logger.warning(f"Serper LinkedIn search failed: {e}")
             return {'linkedin': '', 'company_linkedin': '', 'verified': False}
 
     async def _get_company_facts(self, cik: str) -> Optional[Dict[str, Any]]:
@@ -629,19 +603,15 @@ Rules:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
 
-        # Query for recent 10-K, 10-Q, 8-K, DEF 14A filings with a single API call
-        form_types = ['10-K', '10-Q', '8-K', 'DEF 14A', 'SC 13G', '13F-HR']
-        forms_param = ','.join(form_types)
-        
         try:
             params = {
-                'q': '"chief executive" OR "chief financial" OR "chief operating" OR "president" OR "appointed" OR "named"',
-                'forms': forms_param,
+                'forms': '8-K',
+                'items': '5.02',
                 'dateRange': 'custom',
                 'startdt': start_date.strftime('%Y-%m-%d'),
                 'enddt': end_date.strftime('%Y-%m-%d'),
                 'page': 1,
-                'pageSize': 100
+                'pageSize': 20
             }
 
             response = await self.client.get(
