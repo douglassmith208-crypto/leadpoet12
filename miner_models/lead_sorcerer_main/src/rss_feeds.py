@@ -177,8 +177,8 @@ class RSSFeedsSource:
         ]
         
         # Invalid prefixes that should not be used
-        invalid_prefixes = ['info', 'hello', 'contact', 'support', 'team', 
-                           'admin', 'sales', 'marketing', 'help', 'noreply']
+        invalid_prefixes = ['info', 'hello', 'contact', 'support', 'team',
+                            'admin', 'sales', 'marketing', 'help', 'noreply']
         
         if prefix in invalid_prefixes:
             return False
@@ -412,10 +412,6 @@ class RSSFeedsSource:
         
         # Rule: description minimum 70 characters
         if len(lead.get('description', '')) < 70:
-            return False
-        
-        # Rule: linkedin and company_linkedin must be empty strings
-        if lead.get('linkedin') != '' or lead.get('company_linkedin') != '':
             return False
         
         return True

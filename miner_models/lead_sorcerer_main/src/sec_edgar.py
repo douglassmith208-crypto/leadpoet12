@@ -261,8 +261,8 @@ class SECEdgarSource:
         ]
         
         # Invalid prefixes that should not be used
-        invalid_prefixes = ['info', 'hello', 'contact', 'support', 'team', 
-                           'admin', 'sales', 'marketing', 'help', 'noreply']
+        invalid_prefixes = ['info', 'hello', 'contact', 'support', 'team',
+                            'admin', 'sales', 'marketing', 'help', 'noreply']
         
         if prefix in invalid_prefixes:
             return False
@@ -316,7 +316,7 @@ class SECEdgarSource:
         except (ValueError, TypeError):
             return "11-50"  # Default
 
-       async def _verify_linkedin_profile(self, company: str, full_name: str) -> Dict[str, str]:
+    async def _verify_linkedin_profile(self, company: str, full_name: str) -> Dict[str, str]:
         import requests as req_lib
         serper_api_key = os.getenv('SERPER_API_KEY', '')
         if not serper_api_key or not company or not full_name:
@@ -529,7 +529,8 @@ class SECEdgarSource:
             return None
         try:
             acc_formatted = accession_number.replace('-', '')
-            filing_index_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_formatted}/{accession_number}.txt"
+            cik_padded = cik.zfill(10)
+            filing_index_url = f"https://www.sec.gov/Archives/edgar/data/{cik_padded}/{acc_formatted}/{accession_number}.txt"
             response = await self.client.get(filing_index_url, headers=self.headers, timeout=15.0)
             if response.status_code != 200:
                 return None
@@ -860,16 +861,11 @@ Rules:
             if not company_facts:
                 continue
             
-            # Get real website from SEC API - if no website, skip this company
+            # Get real website from SEC API - if no website, use fallback construction
             website = company_facts.get('website', '')
-            if not website:
-                logger.info(f"No website found for {company_name} (CIK: {cik}), skipping")
-                continue
             
             # Extract root domain from website
             domain = self._extract_root_domain(website)
-            if not domain:
-                continue
             
             # Use SIC code to map to correct industry
             sic_code = company_facts.get('sic', '')
